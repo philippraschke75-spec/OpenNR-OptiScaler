@@ -442,7 +442,9 @@ bool FSRFG_Dx12::Dispatch()
     if (config->FGDebugPacingLines.value_or_default())
         fgConfig.flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_PACING_LINES;
 
-    fgConfig.allowAsyncWorkloads = config->FGAsync.value_or_default();
+    // RDNA2 DLSS-FG: our callback list must run on the game queue, behind our input submission (INTEGRATION.md 6)
+    const bool rdna2 = Rdna2Ready();
+    fgConfig.allowAsyncWorkloads = config->FGAsync.value_or_default() && !rdna2;
 
     // if (state.activeFgInput != FGInput::Upscaler)
     {
@@ -519,7 +521,12 @@ bool FSRFG_Dx12::Dispatch()
     ffxReturnCode_t loggingRetCode = FfxApiProxy::D3D12_Configure(&_fgContext, &fgLogging.header);
 
     bool dispatchResult = false;
-    if (retCode == FFX_API_RETURN_OK && _isActive)
+    if (retCode == FFX_API_RETURN_OK && _isActive && rdna2)
+    {
+        // No FFX prepare: our own submission carries the inputs, the callback records only the output
+        dispatchResult = Rdna2RecordInputs(fIndex, willDispatchFrame);
+    }
+    else if (retCode == FFX_API_RETURN_OK && _isActive)
     {
         ffxCreateBackendDX12Desc backendDesc {};
         backendDesc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
@@ -1040,6 +1047,44 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
     }
 
     callbackLock.unlock();
+
+    // RDNA2 DLSS-FG: bounded GPU wait for our HIP job + copy into FFX's outputs, or no generated frame
+    if (_rdna2Ctx != nullptr && Config::Instance()->FGRdna2.value_or_default())
+    {
+        int32_t recorded = 0;
+
+        if (params->numGeneratedFrames > 0 && cmdList != nullptr)
+        {
+            Rdna2FgOutputs out {};
+            out.struct_size = sizeof(out);
+            out.frame_id = params->frameID;
+            out.cmd_list = cmdList;
+            out.present_color = params->presentColor.resource;
+            out.present_state = GetD3D12State((FfxApiResourceState) params->presentColor.state);
+            out.num_outputs = std::min<uint32_t>(params->numGeneratedFrames, RDNA2FG_MAX_FRAMES);
+
+            for (uint32_t i = 0; i < out.num_outputs; i++)
+            {
+                out.output[i] = params->outputs[i].resource;
+                out.output_state[i] = GetD3D12State((FfxApiResourceState) params->outputs[i].state);
+            }
+
+            out.rect_left = params->generationRect.left;
+            out.rect_top = params->generationRect.top;
+            out.rect_width = params->generationRect.width;
+            out.rect_height = params->generationRect.height;
+
+            recorded = _rdna2RecordOutput(_rdna2Ctx, &out);
+
+            if (recorded < 0)
+                LOG_ERROR("Rdna2FgRecordOutput: {}", _rdna2LastError());
+        }
+
+        params->numGeneratedFrames = recorded > 0 ? (uint32_t) recorded : 0;
+        _lastFrameId = params->frameID;
+
+        return FFX_API_RETURN_OK;
+    }
 
     auto dispatchResult = FfxApiProxy::D3D12_Dispatch(&_fgContext, &params->header);
     LOG_DEBUG("D3D12_Dispatch result: {}, fIndex: {}", (UINT) dispatchResult, fIndex);
@@ -1579,6 +1624,8 @@ void FSRFG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
 
 void FSRFG_Dx12::ReleaseObjects()
 {
+    Rdna2Release();
+
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
         SAFE_RELEASE(_fgCommandAllocator[i]);
@@ -2039,4 +2086,170 @@ bool FSRFG_Dx12::Present()
     _fgFramePresentId++;
 
     return Dispatch();
+}
+
+// ---------------------------------------------------------------- RDNA2 DLSS-FG (Rdna2FgRuntime.dll)
+
+bool FSRFG_Dx12::Rdna2Ready()
+{
+    if (!Config::Instance()->FGRdna2.value_or_default() || _rdna2Failed)
+        return false;
+
+    if (_rdna2Ctx != nullptr)
+        return true;
+
+    if (_device == nullptr || _gameCommandQueue == nullptr)
+        return false;
+
+    _rdna2Failed = true; // one attempt per FG context
+
+    if (_rdna2Dll == nullptr)
+    {
+        auto path = Util::DllPath().parent_path() / L"Rdna2FgRuntime.dll";
+        _rdna2Dll = LoadLibraryW(path.c_str());
+
+        if (_rdna2Dll == nullptr)
+        {
+            LOG_ERROR("RDNA2 DLSS-FG: can't load {} ({})", wstring_to_string(path.wstring()), GetLastError());
+            return false;
+        }
+
+        _rdna2Create = (PFN_Rdna2FgCreate) GetProcAddress(_rdna2Dll, "Rdna2FgCreate");
+        _rdna2RecordInputs = (PFN_Rdna2FgRecordInputs) GetProcAddress(_rdna2Dll, "Rdna2FgRecordInputs");
+        _rdna2RecordOutput = (PFN_Rdna2FgRecordOutput) GetProcAddress(_rdna2Dll, "Rdna2FgRecordOutput");
+        _rdna2GetStatus = (PFN_Rdna2FgGetStatus) GetProcAddress(_rdna2Dll, "Rdna2FgGetStatus");
+        _rdna2Destroy = (PFN_Rdna2FgDestroy) GetProcAddress(_rdna2Dll, "Rdna2FgDestroy");
+        _rdna2LastError = (PFN_Rdna2FgLastError) GetProcAddress(_rdna2Dll, "Rdna2FgLastError");
+    }
+
+    if (!_rdna2Create || !_rdna2RecordInputs || !_rdna2RecordOutput || !_rdna2GetStatus || !_rdna2Destroy ||
+        !_rdna2LastError)
+    {
+        LOG_ERROR("RDNA2 DLSS-FG: Rdna2FgRuntime.dll is missing exports");
+        return false;
+    }
+
+    if (_rdna2Create(_device, _gameCommandQueue, &_rdna2Ctx) != RDNA2FG_OK)
+    {
+        LOG_ERROR("RDNA2 DLSS-FG: {}", _rdna2LastError());
+        _rdna2Ctx = nullptr;
+        return false;
+    }
+
+    LOG_INFO("RDNA2 DLSS-FG: runtime created, FFX interpolation replaced");
+    _rdna2Failed = false;
+    return true;
+}
+
+void FSRFG_Dx12::Rdna2Release()
+{
+    // FFX's context is gone or idle here; Destroy drains our worker and the game queue (bounded)
+    if (_rdna2Ctx != nullptr && _rdna2Destroy != nullptr)
+        _rdna2Destroy(_rdna2Ctx);
+
+    _rdna2Ctx = nullptr;
+    _rdna2Failed = false;
+    // ponytail: the DLL stays loaded for the process (unloading the HIP runtime mid-game is not worth the risk)
+}
+
+bool FSRFG_Dx12::Rdna2RecordInputs(int fIndex, UINT64 frameId)
+{
+    DXGI_SWAP_CHAIN_DESC scDesc {};
+    if (_swapChain == nullptr || _swapChain->GetDesc(&scDesc) != S_OK)
+        return false;
+
+    Rdna2FgInputs in {};
+    in.struct_size = sizeof(in);
+    in.frame_id = frameId;
+    in.out_width = scDesc.BufferDesc.Width;
+    in.out_height = scDesc.BufferDesc.Height;
+    in.num_frames = 1; // FFX's swapchain presents one generated frame per real frame
+    in.reset = _reset[fIndex] != 0;
+
+    // Copies made by OptiScaler sit in COPY_DEST, originals in the state the game reported
+    auto stateOf = [](Dx12Resource& r)
+    { return (uint32_t) (r.copy != nullptr ? D3D12_RESOURCE_STATE_COPY_DEST : r.state); };
+
+    auto& state = State::Instance();
+    UINT renderWidth = 0, renderHeight = 0;
+    auto depth = GetResource(FG_ResourceType::Depth, fIndex);
+
+    if (state.currentFeature && state.activeFgInput == FGInput::Upscaler)
+    {
+        renderWidth = state.currentFeature->RenderWidth();
+        renderHeight = state.currentFeature->RenderHeight();
+    }
+    else if (depth)
+    {
+        renderWidth = (UINT) depth->width;
+        renderHeight = depth->height;
+    }
+
+    if (depth && IsResourceReady(FG_ResourceType::Depth, fIndex))
+    {
+        in.depth = depth->GetResource();
+        in.depth_state = stateOf(*depth);
+        in.depth_width = renderWidth;
+        in.depth_height = renderHeight;
+    }
+
+    auto velocity = GetResource(FG_ResourceType::Velocity, fIndex);
+    if (velocity && IsResourceReady(FG_ResourceType::Velocity, fIndex))
+    {
+        in.motion = velocity->GetResource();
+        in.motion_state = stateOf(*velocity);
+        in.mv_width = IsLowResMV() ? renderWidth : in.out_width;
+        in.mv_height = IsLowResMV() ? renderHeight : in.out_height;
+        in.mv_scale_x = _mvScaleX[fIndex];
+        in.mv_scale_y = _mvScaleY[fIndex];
+    }
+
+    ID3D12Resource* backBuffer = nullptr;
+    auto hudless = GetResource(FG_ResourceType::HudlessColor, fIndex);
+
+    if (hudless && IsResourceReady(FG_ResourceType::HudlessColor, fIndex) &&
+        !Config::Instance()->FGDisableHudless.value_or_default())
+    {
+        in.color = hudless->GetResource();
+        in.color_state = stateOf(*hudless);
+        in.color_is_hudless = 1;
+    }
+    else
+    {
+        // The game's finished frame, about to be presented
+        IDXGISwapChain3* sc3 = nullptr;
+        if (_swapChain->QueryInterface(IID_PPV_ARGS(&sc3)) == S_OK)
+        {
+            sc3->GetBuffer(sc3->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&backBuffer));
+            sc3->Release();
+        }
+
+        in.color = backBuffer;
+        in.color_state = D3D12_RESOURCE_STATE_PRESENT;
+    }
+
+    int32_t result = in.color != nullptr ? _rdna2RecordInputs(_rdna2Ctx, &in) : RDNA2FG_ERROR;
+
+    if (backBuffer != nullptr)
+        backBuffer->Release();
+
+    if (result < 0)
+    {
+        static uint32_t errors = 0;
+        if (errors++ < 20)
+            LOG_ERROR("Rdna2FgRecordInputs: {}", in.color ? _rdna2LastError() : "no colour resource");
+    }
+
+    return result >= 0;
+}
+
+std::string FSRFG_Dx12::Rdna2Status()
+{
+    char buf[512] = {};
+
+    if (_rdna2Ctx == nullptr || _rdna2GetStatus == nullptr ||
+        _rdna2GetStatus(_rdna2Ctx, buf, sizeof(buf)) != RDNA2FG_OK)
+        return {};
+
+    return buf;
 }

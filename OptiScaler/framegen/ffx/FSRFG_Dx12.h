@@ -8,6 +8,7 @@
 #include <shaders/reproject/Reproject_Dx12.h>
 
 #include <ffx_framegeneration.h>
+#include "Rdna2FgApi.h"
 
 class FSRFG_Dx12 : public virtual IFGFeature_Dx12
 {
@@ -38,6 +39,21 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
 
     ID3D12GraphicsCommandList* _fgCommandList[BUFFER_COUNT] {};
     ID3D12CommandAllocator* _fgCommandAllocator[BUFFER_COUNT] {};
+
+    // RDNA2 DLSS-FG (Rdna2FgRuntime.dll, [FSRFG] Rdna2FG): replaces only FFX's interpolation dispatch,
+    // FFX's swapchain keeps presenting and pacing (fgport\INTEGRATION.md)
+    HMODULE _rdna2Dll = nullptr;
+    void* _rdna2Ctx = nullptr;
+    bool _rdna2Failed = false;
+    PFN_Rdna2FgCreate _rdna2Create = nullptr;
+    PFN_Rdna2FgRecordInputs _rdna2RecordInputs = nullptr;
+    PFN_Rdna2FgRecordOutput _rdna2RecordOutput = nullptr;
+    PFN_Rdna2FgGetStatus _rdna2GetStatus = nullptr;
+    PFN_Rdna2FgDestroy _rdna2Destroy = nullptr;
+    PFN_Rdna2FgLastError _rdna2LastError = nullptr;
+    bool Rdna2Ready();
+    void Rdna2Release();
+    bool Rdna2RecordInputs(int fIndex, UINT64 frameId);
 
     static FfxApiResourceState GetFfxApiState(D3D12_RESOURCE_STATES state)
     {
@@ -111,6 +127,7 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
 
     ffxReturnCode_t PresentCallback(ffxCallbackDescFrameGenerationPresent* params);
     ffxReturnCode_t DispatchCallback(ffxDispatchDescFrameGeneration* params);
+    std::string Rdna2Status(); // empty when RDNA2 DLSS-FG is not running
 
     FSRFG_Dx12() : IFGFeature_Dx12(), IFGFeature()
     {

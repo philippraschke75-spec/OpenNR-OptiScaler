@@ -34,6 +34,7 @@
 #include <framegen/nvngx/Nvngx_FG.h>
 #include <framegen/dlssg/MfgUnlock.h>
 #include <framegen/reprojection/Reprojection_Dx12.h>
+#include <framegen/ffx/FSRFG_Dx12.h>
 
 #include <nvapi/fakenvapi.h>
 #include <hooks/Reflex_Hooks.h>
@@ -6472,6 +6473,18 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     if (!config->FGOutput.has_value())
         config->FGOutput = config->FGOutput.value_or_default(); // need to have a value before combo
 
+    // RDNA2 DLSS-FG: FSR-FG output with Rdna2FgRuntime.dll doing the interpolation ([FSRFG] Rdna2FG); appended after the
+    // enum-indexed entries, its value is not an FGOutput and is mapped back to FSRFG + FGRdna2 when picked
+    constexpr auto rdna2FgOutput = (FGOutput) 100;
+    outputOptions.push_back({ rdna2FgOutput, "RDNA2 DLSS-FG (experimental)",
+                              "FSR-FG presents and paces, Rdna2FgRuntime.dll generates the frames (RX 6000, HIP)\n"
+                              "Needs Rdna2FgRuntime.dll in the OptiScaler folder, forces FSR-FG async off" });
+    outputOptions.back().disabled = outputOptions[fsrfgOutputIndex].disabled;
+    if (outputOptions.back().disabled)
+        outputOptions.back().tooltip = outputOptions[fsrfgOutputIndex].tooltip;
+    if (!outputOptions.back().disabled && primaryGpu.vendorId != VendorId::AMD)
+        outputOptions.back().set_disabled(true, "RDNA2 (RX 6000) only");
+
     /// FG NVNGX REPLACEMENT
 
     static std::vector<MenuOption<FGNvngxReplacement>> nvngxOptions;
@@ -6562,8 +6575,24 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             }
             else
             {
-                PopulateCombo("FG Output", config->FGOutput, outputOptions);
+                const bool rdna2Shown = config->FGRdna2.value_or_default() &&
+                                        config->FGOutput.value_or_default() == FGOutput::FSRFG;
+                FGOutput shownOutput = rdna2Shown ? rdna2FgOutput : config->FGOutput.value_or_default();
+                PopulateCombo("FG Output", shownOutput, outputOptions);
                 ShowTooltip("The FG that you will actually be using");
+
+                if (shownOutput != (rdna2Shown ? rdna2FgOutput : config->FGOutput.value_or_default()))
+                {
+                    config->FGRdna2 = shownOutput == rdna2FgOutput;
+                    config->FGOutput = shownOutput == rdna2FgOutput ? FGOutput::FSRFG : shownOutput;
+                }
+
+                if (rdna2Shown)
+                {
+                    auto fsrfg = dynamic_cast<FSRFG_Dx12*>(state.currentFG);
+                    auto status = fsrfg ? fsrfg->Rdna2Status() : std::string();
+                    ImGui::TextUnformatted(status.empty() ? "RDNA2 DLSS-FG: not running (see log)" : status.c_str());
+                }
             }
 
             if (showNvngxFgDowndown)

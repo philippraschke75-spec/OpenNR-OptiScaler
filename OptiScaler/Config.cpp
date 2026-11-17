@@ -232,6 +232,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGDebugResetLines.set_from_config(readBool("FSRFG", "DebugResetLines"));
             FGDebugPacingLines.set_from_config(readBool("FSRFG", "DebugPacingLines"));
             FGAsync.set_from_config(readBool("FSRFG", "AllowAsync"));
+            FGRdna2.set_from_config(readBool("FSRFG", "Rdna2FG"));
             FGUseMutexForSwapchain.set_from_config(readBool("FSRFG", "UseMutexForSwapchain"));
             FGFramePacingTuning.set_from_config(readBool("FSRFG", "FramePacingTuning"));
             FGFPTSafetyMarginInMs.set_from_config(readFloat("FSRFG", "FPTSafetyMarginInMs"));
@@ -1462,6 +1463,7 @@ bool Config::SaveIni()
         ini.SetValue("FSRFG", "DebugPacingLines",
                      GetBoolValue(Instance()->FGDebugPacingLines.value_for_config()).c_str());
         ini.SetValue("FSRFG", "AllowAsync", GetBoolValue(Instance()->FGAsync.value_for_config()).c_str());
+        ini.SetValue("FSRFG", "Rdna2FG", GetBoolValue(Instance()->FGRdna2.value_for_config()).c_str());
         ini.SetValue("FSRFG", "UseMutexForSwapchain",
                      GetBoolValue(Instance()->FGUseMutexForSwapchain.value_for_config()).c_str());
         ini.SetValue("FSRFG", "FramePacingTuning",

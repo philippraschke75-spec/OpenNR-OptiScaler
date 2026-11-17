@@ -1442,6 +1442,7 @@ class Config
     CustomOptional<bool> FGDebugTearLines { false };
     CustomOptional<bool> FGDebugPacingLines { false };
     CustomOptional<bool> FGAsync { false };
+    CustomOptional<bool> FGRdna2 { false }; // FSR-FG output with Rdna2FgRuntime.dll (RDNA2 DLSS-FG, experimental) instead of FFX interpolation
     CustomOptional<bool> FGFramePacingTuning { true };
     CustomOptional<float> FGFPTSafetyMarginInMs { 0.01f };
     CustomOptional<float> FGFPTVarianceFactor { 0.3f };
