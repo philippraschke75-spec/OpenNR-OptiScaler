@@ -11,6 +11,8 @@
 #include <dlssnr/amd/AmdBridge.h>
 #include <framegen/dlssg/MfgUnlock.h>
 #include <framegen/xefg/XeFG_Dx12.h>
+#include <framegen/ffx/Rdna2FgApi.h>
+#include <framegen/ffx/Rdna2Mfg.h>
 #include <proxies/KernelBase_Proxy.h>
 #include <imgui/ImGuiNotify.hpp>
 
@@ -1229,6 +1231,10 @@ static int OutputMaxInterpolationCount()
 
     if (auto fg = state.CurrentFG(); fg != nullptr && fg->GetMaxInterpolationCount() > 1)
         return fg->GetMaxInterpolationCount();
+
+    // RDNA2 DLSS-FG on the FSR-FG output generates up to 5 frames (Rdna2Mfg.h)
+    if (state.activeFgOutput == FGOutput::FSRFG && Config::Instance()->FGRdna2.value_or_default())
+        return (int) std::min<UINT>(Rdna2Mfg::kMaxFrames, RDNA2FG_MAX_FRAMES);
 
     if (state.activeFgOutput == FGOutput::XeFG)
     {

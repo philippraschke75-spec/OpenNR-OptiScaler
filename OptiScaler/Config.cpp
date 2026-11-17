@@ -233,6 +233,10 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGDebugPacingLines.set_from_config(readBool("FSRFG", "DebugPacingLines"));
             FGAsync.set_from_config(readBool("FSRFG", "AllowAsync"));
             FGRdna2.set_from_config(readBool("FSRFG", "Rdna2FG"));
+            FGRdna2Multiplier.set_from_config(readInt("FSRFG", "Rdna2FGMultiplier"));
+            if (FGRdna2Multiplier.has_value() &&
+                (FGRdna2Multiplier.value() < 2 || FGRdna2Multiplier.value() > 6))
+                FGRdna2Multiplier.reset();
             FGUseMutexForSwapchain.set_from_config(readBool("FSRFG", "UseMutexForSwapchain"));
             FGFramePacingTuning.set_from_config(readBool("FSRFG", "FramePacingTuning"));
             FGFPTSafetyMarginInMs.set_from_config(readFloat("FSRFG", "FPTSafetyMarginInMs"));
@@ -1464,6 +1468,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FGDebugPacingLines.value_for_config()).c_str());
         ini.SetValue("FSRFG", "AllowAsync", GetBoolValue(Instance()->FGAsync.value_for_config()).c_str());
         ini.SetValue("FSRFG", "Rdna2FG", GetBoolValue(Instance()->FGRdna2.value_for_config()).c_str());
+        ini.SetValue("FSRFG", "Rdna2FGMultiplier",
+                     GetIntValue(Instance()->FGRdna2Multiplier.value_for_config()).c_str());
         ini.SetValue("FSRFG", "UseMutexForSwapchain",
                      GetBoolValue(Instance()->FGUseMutexForSwapchain.value_for_config()).c_str());
         ini.SetValue("FSRFG", "FramePacingTuning",

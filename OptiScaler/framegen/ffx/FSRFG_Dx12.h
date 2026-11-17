@@ -9,6 +9,7 @@
 
 #include <ffx_framegeneration.h>
 #include "Rdna2FgApi.h"
+#include "Rdna2Mfg.h"
 
 class FSRFG_Dx12 : public virtual IFGFeature_Dx12
 {
@@ -54,6 +55,16 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
     bool Rdna2Ready();
     void Rdna2Release();
     bool Rdna2RecordInputs(int fIndex, UINT64 frameId);
+
+    // Multi-frame generation: generated frames per real frame, from [FSRFG] Rdna2FGMultiplier or the game's DLSS-G
+    // count; FFX's pacing is off while it is above 1 (Rdna2Mfg.h)
+    UINT Rdna2Frames() const
+    {
+        const int n = Config::Instance()->FGInterpolationCount(Config::Instance()->FGRdna2Multiplier.value_or_default() - 1);
+        return (UINT) std::clamp(n, 1, (int) std::min<UINT>(Rdna2Mfg::kMaxFrames, RDNA2FG_MAX_FRAMES));
+    }
+    bool _rdna2PacingOff = false;
+    bool _rdna2PacingSent = false;
 
     static FfxApiResourceState GetFfxApiState(D3D12_RESOURCE_STATES state)
     {

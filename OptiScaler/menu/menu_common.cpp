@@ -6592,6 +6592,13 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                     auto fsrfg = dynamic_cast<FSRFG_Dx12*>(state.currentFG);
                     auto status = fsrfg ? fsrfg->Rdna2Status() : std::string();
                     ImGui::TextUnformatted(status.empty() ? "RDNA2 DLSS-FG: not running (see log)" : status.c_str());
+
+                    int multiplier = config->FGRdna2Multiplier.value_or_default() - 2;
+                    if (ImGui::Combo("RDNA2 FG multiplier", &multiplier, "2x\0003x\0004x\0005x\0006x\0"))
+                        config->FGRdna2Multiplier = multiplier + 2;
+                    ShowTooltip("Output frames per real frame. Above 2x OptiScaler presents and paces the extra\n"
+                                "frames (FSR-FG presents one). With FG following the game (DLSSG input),\n"
+                                "the game's own frame generation count is used instead.");
                 }
             }
 

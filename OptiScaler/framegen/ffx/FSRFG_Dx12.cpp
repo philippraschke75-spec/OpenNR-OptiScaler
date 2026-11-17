@@ -277,15 +277,26 @@ void FSRFG_Dx12::ConfigureFramePaceTuning()
     if (_swapChainContext == nullptr || Version() < feature_version { 3, 1, 3 })
         return;
 
-    FfxSwapchainFramePacingTuning fpt {};
-    if (Config::Instance()->FGFramePacingTuning.value_or_default())
+    FfxSwapchainFramePacingTuning fpt { 0.1f, 0.1f, false, 2, false }; // FFX's defaults
+    const bool tuning = Config::Instance()->FGFramePacingTuning.value_or_default();
+    if (tuning || _rdna2PacingOff || _rdna2PacingSent)
     {
-        fpt.allowHybridSpin = Config::Instance()->FGFPTAllowHybridSpin.value_or_default();
-        fpt.allowWaitForSingleObjectOnFence =
-            Config::Instance()->FGFPTAllowWaitForSingleObjectOnFence.value_or_default();
-        fpt.hybridSpinTime = Config::Instance()->FGFPTHybridSpinTime.value_or_default();
-        fpt.safetyMarginInMs = Config::Instance()->FGFPTSafetyMarginInMs.value_or_default();
-        fpt.varianceFactor = Config::Instance()->FGFPTVarianceFactor.value_or_default();
+        if (tuning)
+        {
+            fpt.allowHybridSpin = Config::Instance()->FGFPTAllowHybridSpin.value_or_default();
+            fpt.allowWaitForSingleObjectOnFence =
+                Config::Instance()->FGFPTAllowWaitForSingleObjectOnFence.value_or_default();
+            fpt.hybridSpinTime = Config::Instance()->FGFPTHybridSpinTime.value_or_default();
+            fpt.safetyMarginInMs = Config::Instance()->FGFPTSafetyMarginInMs.value_or_default();
+            fpt.varianceFactor = Config::Instance()->FGFPTVarianceFactor.value_or_default();
+        }
+
+        // RDNA2 multi-frame generation paces every present itself (Rdna2Mfg.h): a margin above half any frame
+        // interval makes FFX present as soon as a frame is ready
+        if (_rdna2PacingOff)
+            fpt.safetyMarginInMs = 1000.0f;
+
+        _rdna2PacingSent = _rdna2PacingOff;
 
         ffxConfigureDescFrameGenerationSwapChainKeyValueDX12 cfgDesc {};
         cfgDesc.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_KEYVALUE_DX12;
@@ -294,6 +305,10 @@ void FSRFG_Dx12::ConfigureFramePaceTuning()
 
         auto result = FfxApiProxy::D3D12_Configure(&_swapChainContext, &cfgDesc.header);
         LOG_DEBUG("HybridSpin D3D12_Configure result: {}", FfxApiProxy::ReturnCodeToString(result));
+
+        if (_rdna2PacingOff || !tuning)
+            LOG_INFO("RDNA2 MFG: FFX pacing {} ({})", _rdna2PacingOff ? "off" : "restored",
+                     FfxApiProxy::ReturnCodeToString(result));
     }
 }
 
@@ -446,6 +461,16 @@ bool FSRFG_Dx12::Dispatch()
     const bool rdna2 = Rdna2Ready();
     fgConfig.allowAsyncWorkloads = config->FGAsync.value_or_default() && !rdna2;
 
+    // RDNA2 multi-frame generation: our present callback tags FFX's presents for Rdna2Mfg's pacer, FFX stops pacing
+    const UINT rdna2Frames = rdna2 ? Rdna2Frames() : 1;
+    Rdna2Mfg::SetFrames(rdna2Frames);
+    _framesToInterpolate = rdna2 ? (int) rdna2Frames : -1;
+    if (_rdna2PacingOff != (rdna2Frames > 1))
+    {
+        _rdna2PacingOff = rdna2Frames > 1;
+        ConfigureFramePaceTuning();
+    }
+
     // if (state.activeFgInput != FGInput::Upscaler)
     {
         // use swapchain buffer info
@@ -485,6 +510,28 @@ bool FSRFG_Dx12::Dispatch()
                 return fsrFG->PresentCallback(params);
 
             return FFX_API_RETURN_ERROR;
+        };
+    }
+    else if (rdna2Frames > 1)
+    {
+        fgConfig.presentCallbackUserContext = this;
+        fgConfig.presentCallback = [](ffxCallbackDescFrameGenerationPresent* params, void*) -> ffxReturnCode_t
+        {
+            // FFX's composition without a UI resource (OptiScaler registers none): a copy
+            auto src = (ID3D12Resource*) params->currentBackBuffer.resource;
+            auto dst = (ID3D12Resource*) params->outputSwapChainBuffer.resource;
+            auto cmdList = (ID3D12GraphicsCommandList*) params->commandList;
+            const auto srcState = GetD3D12State((FfxApiResourceState) params->currentBackBuffer.state);
+            const auto dstState = GetD3D12State((FfxApiResourceState) params->outputSwapChainBuffer.state);
+
+            ::ResourceBarrier(cmdList, src, srcState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            ::ResourceBarrier(cmdList, dst, dstState, D3D12_RESOURCE_STATE_COPY_DEST);
+            cmdList->CopyResource(dst, src);
+            ::ResourceBarrier(cmdList, src, D3D12_RESOURCE_STATE_COPY_SOURCE, srcState);
+            ::ResourceBarrier(cmdList, dst, D3D12_RESOURCE_STATE_COPY_DEST, dstState);
+
+            Rdna2Mfg::Tag(params->isGeneratedFrame, params->frameID);
+            return FFX_API_RETURN_OK;
         };
     }
     // else
@@ -1061,13 +1108,21 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
             out.cmd_list = cmdList;
             out.present_color = params->presentColor.resource;
             out.present_state = GetD3D12State((FfxApiResourceState) params->presentColor.state);
-            out.num_outputs = std::min<uint32_t>(params->numGeneratedFrames, RDNA2FG_MAX_FRAMES);
+            out.num_outputs = 1; // FFX presents one; frames 2..N go to Rdna2Mfg's textures, presented by its pacer
+            out.output[0] = params->outputs[0].resource;
+            out.output_state[0] = GetD3D12State((FfxApiResourceState) params->outputs[0].state);
 
-            for (uint32_t i = 0; i < out.num_outputs; i++)
+            ID3D12Resource* extra[Rdna2Mfg::kMaxFrames - 1] {};
+            const UINT extras = Rdna2Mfg::Acquire((ID3D12Resource*) out.output[0], params->frameID,
+                                                  Rdna2Frames() - 1, extra);
+
+            for (UINT i = 0; i < extras; i++)
             {
-                out.output[i] = params->outputs[i].resource;
-                out.output_state[i] = GetD3D12State((FfxApiResourceState) params->outputs[i].state);
+                out.output[1 + i] = extra[i];
+                out.output_state[1 + i] = D3D12_RESOURCE_STATE_COMMON;
             }
+
+            out.num_outputs += extras;
 
             out.rect_left = params->generationRect.left;
             out.rect_top = params->generationRect.top;
@@ -1078,9 +1133,11 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
 
             if (recorded < 0)
                 LOG_ERROR("Rdna2FgRecordOutput: {}", _rdna2LastError());
+
+            Rdna2Mfg::Commit(params->frameID, recorded);
         }
 
-        params->numGeneratedFrames = recorded > 0 ? (uint32_t) recorded : 0;
+        params->numGeneratedFrames = recorded > 0 ? 1 : 0;
         _lastFrameId = params->frameID;
 
         return FFX_API_RETURN_OK;
@@ -2137,12 +2194,15 @@ bool FSRFG_Dx12::Rdna2Ready()
     }
 
     LOG_INFO("RDNA2 DLSS-FG: runtime created, FFX interpolation replaced");
+    Rdna2Mfg::S().log = [](const char* m) { LOG_WARN("{}", m); };
     _rdna2Failed = false;
     return true;
 }
 
 void FSRFG_Dx12::Rdna2Release()
 {
+    Rdna2Mfg::Release();
+
     // FFX's context is gone or idle here; Destroy drains our worker and the game queue (bounded)
     if (_rdna2Ctx != nullptr && _rdna2Destroy != nullptr)
         _rdna2Destroy(_rdna2Ctx);
@@ -2163,7 +2223,7 @@ bool FSRFG_Dx12::Rdna2RecordInputs(int fIndex, UINT64 frameId)
     in.frame_id = frameId;
     in.out_width = scDesc.BufferDesc.Width;
     in.out_height = scDesc.BufferDesc.Height;
-    in.num_frames = 1; // FFX's swapchain presents one generated frame per real frame
+    in.num_frames = Rdna2Frames(); // frame 1 to FFX's output, 2..N to Rdna2Mfg's (multi-frame generation)
     in.reset = _reset[fIndex] != 0;
 
     // Copies made by OptiScaler sit in COPY_DEST, originals in the state the game reported
@@ -2259,6 +2319,10 @@ std::string FSRFG_Dx12::Rdna2Status()
     if (_rdna2Ctx == nullptr || _rdna2GetStatus == nullptr ||
         _rdna2GetStatus(_rdna2Ctx, buf, sizeof(buf)) != RDNA2FG_OK)
         return {};
+
+    if (const auto& m = Rdna2Mfg::S(); Rdna2Mfg::Frames() > 1)
+        return std::format("{}\nmfg {}x: {:.2f} ms base, bursts {} extra frames {} no set {}", buf, Rdna2Mfg::Frames() + 1,
+                           m.periodMs, m.stats.bursts, m.stats.extras, m.stats.noSet);
 
     return buf;
 }

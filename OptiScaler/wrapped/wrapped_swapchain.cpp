@@ -15,6 +15,7 @@
 #include <with_dx12/dx11_with_dx12_sync.h>
 
 #include <menu/menu_overlay_dx.h>
+#include <framegen/ffx/Rdna2Mfg.h>
 
 #include <misc/FrameLimit.h>
 #include <misc/DeferredRelease.h>
@@ -824,7 +825,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UIN
 
     if ((Flags & DXGI_PRESENT_TEST) == 0)
     {
-        result = LocalPresent(_real, SyncInterval, Flags, nullptr, _device, _handle, _uwp);
+        // RDNA2 multi-frame generation: on FSR-FG's presenter thread this adds and paces the frames 2..N
+        result = Rdna2Mfg::Present(_device, _real, Flags, [&]
+                                   { return LocalPresent(_real, SyncInterval, Flags, nullptr, _device, _handle, _uwp); });
 
         // When Reflex can't be used to limit, sleep in present
         // DXVK's DXGI presents through Vulkan where the limiter already sleeps
@@ -1194,7 +1197,11 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present1(UINT SyncInterval, UI
 
     if ((Flags & DXGI_PRESENT_TEST) == 0)
     {
-        result = LocalPresent(_real1, SyncInterval, Flags, pPresentParameters, _device, _handle, _uwp);
+        result = Rdna2Mfg::Present(_device, _real1, Flags,
+                                   [&] {
+                                       return LocalPresent(_real1, SyncInterval, Flags, pPresentParameters, _device,
+                                                           _handle, _uwp);
+                                   });
 
         // When Reflex can't be used to limit, sleep in present
         // DXVK's DXGI presents through Vulkan where the limiter already sleeps
