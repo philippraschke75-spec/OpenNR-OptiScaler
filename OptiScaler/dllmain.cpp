@@ -1784,6 +1784,14 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         exeModule = GetModuleHandle(nullptr);
         processId = GetCurrentProcessId();
 
+        // HIP users in this process (WrongGPU Model K, RDNA2 NR, RDNA2 FG) share one HIP runtime, which maps their streams onto
+        // GPU_MAX_HW_QUEUES hardware queues (default 4). WrongGPU parks a GPU-side wait for a game-queue fence on its stream at
+        // record time; another runtime's work that shares that queue then waits for the game queue, whose bounded spin waits for
+        // that work: every frame runs to the spin bound (~380 ms with NR + FG + K). 16 gives every stream its own queue.
+        // HIP reads it once when it starts, so it is set here, before any HIP user loads; a value the user set stays.
+        if (GetEnvironmentVariableW(L"GPU_MAX_HW_QUEUES", nullptr, 0) == 0)
+            SetEnvironmentVariableW(L"GPU_MAX_HW_QUEUES", L"16");
+
         // Main Opti DLL path
         if (!Config::Instance()->MainDllPath.has_value())
         {
