@@ -64,6 +64,7 @@ struct State
     double periodMs = 0, lastArrivalMs = 0, lastPresentMs = 0, lastGenMs = 0;
     UINT64 entryFrame = ~0ull;
     UINT entryPresents = 0;
+    UINT behindRun = 0; // consecutive real frames that arrived before their slot
     DWORD presenterThread = 0;
     Stats stats;
 };
@@ -360,7 +361,9 @@ inline HRESULT Present(IUnknown* queueOwner, IDXGISwapChain* sc, UINT flags, con
         // Arriving before the previous burst's spacing ran out means the game waited for us (FFX holds its next
         // Present until this thread composed the last real frame): the interval is ours, not the game's, shorten it
         const double iv = now - s.lastArrivalMs;
-        const bool behind = s.periodMs > 0 && now < s.lastPresentMs + s.slack * s.periodMs / (n + 1);
+        const bool early = s.periodMs > 0 && now < s.lastPresentMs + s.slack * s.periodMs / (n + 1);
+        s.behindRun = early ? s.behindRun + 1 : 0;
+        const bool behind = s.behindRun >= 2; // one early frame is jitter, two in a row are us
         s.periodMs = s.lastArrivalMs == 0 || iv > 100 ? 0
                      : behind                         ? 0.98 * s.periodMs
                      : s.periodMs > 0                 ? 0.9 * s.periodMs + 0.1 * iv
