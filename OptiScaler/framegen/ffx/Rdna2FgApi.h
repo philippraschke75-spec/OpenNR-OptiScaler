@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 #define RDNA2FG_ABI 3
-#define RDNA2FG_MAX_FRAMES 4
+#define RDNA2FG_MAX_FRAMES 5
 enum { RDNA2FG_OK = 0, RDNA2FG_SKIP = 1, RDNA2FG_ERROR = -1 };
 
 typedef struct Rdna2FgInputs {
