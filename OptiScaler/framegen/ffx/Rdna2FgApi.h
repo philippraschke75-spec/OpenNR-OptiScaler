@@ -1,4 +1,4 @@
-// Rdna2FgApi.h - C ABI of Rdna2FgRuntime.dll (RDNA2 frame generation: D3D12 recording + HIP worker), ABI 2.
+// Rdna2FgApi.h - C ABI of Rdna2FgRuntime.dll (RDNA2 frame generation: D3D12 recording + HIP worker), ABI 3.
 // Host: OptiScaler fork, FSR-FG output path (FSRFG_Dx12). Copy of this header: OptiScaler/framegen/ffx/Rdna2FgApi.h.
 //
 // Per real frame (game thread):
@@ -14,7 +14,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-#define RDNA2FG_ABI 2
+#define RDNA2FG_ABI 3
 #define RDNA2FG_MAX_FRAMES 4
 enum { RDNA2FG_OK = 0, RDNA2FG_SKIP = 1, RDNA2FG_ERROR = -1 };
 
@@ -34,7 +34,16 @@ typedef struct Rdna2FgInputs {
     uint32_t reset;                // camera cut: no blend with the previous frame
     uint32_t out_width, out_height;  // swap chain size (= FFX output size)
     uint32_t num_frames;           // generated frames per real frame, 1 (2x) .. RDNA2FG_MAX_FRAMES; 0 = 1
+    // ABI 3 (a v2 host passes a shorter struct_size: these read as 0)
+    void* final_color;             // ID3D12Resource*: the finished frame with UI (back buffer) when `color` is hudless; else null
+    uint32_t final_color_state;
+    uint32_t has_matrices;         // 1: the two matrices below are valid (else identity is used)
+    float clip_to_prev_clip[16];   // sl::Constants::clipToPrevClip, as stored in the struct
+    float prev_clip_to_clip[16];   // sl::Constants::prevClipToClip
+    uint32_t depth_inverted;       // 1: reversed Z (near = 1)
+    float min_rel_separation;      // sl::Constants::minRelativeLinearDepthObjectSeparation (0 = default 40)
 } Rdna2FgInputs;
+#define RDNA2FG_INPUTS_V2_SIZE 104 /* offsetof(Rdna2FgInputs, final_color) on x64 */
 
 typedef struct Rdna2FgOutputs {
     uint32_t struct_size;
@@ -56,26 +65,38 @@ typedef void (*PFN_Rdna2FgDestroy)(void* ctx);
 typedef const char* (*PFN_Rdna2FgLastError)(void);
 
 // ---------------------------------------------------------------- network plug-in
-// Optional Rdna2FgNet.dll beside Rdna2FgRuntime.dll; without it the built-in PLACEHOLDER runs (motion-vector warp of the previous
-// and current frame to time t, blended). Called on the runtime's HIP worker thread with the runtime's HIP device current.
-// Input slots, per pixel (row-major, width x height, 16 bytes): uint4 { rg f16x2, ba f16x2, mv f16x2, depth f32 }
-//   colour in the swap chain's encoding (hudless when the game gives one); mv in uv units, current -> previous position
-//   (prev_uv = uv + mv); depth = raw device depth (0 when the game gives none).
-// Outputs: RGBA16F (uint2 per pixel), one per generated frame, at time t[i] (0 = previous frame, 1 = current frame).
+// Optional Rdna2FgNet.dll beside Rdna2FgRuntime.dll ([fg] network=placeholder in Rdna2FgRuntime.ini forces the built-in one); without
+// it the built-in PLACEHOLDER runs (motion-vector warp of the previous and current frame to time t, blended). Called on the runtime's
+// HIP worker thread with the runtime's HIP device current. Run is called once per real frame (= one job) with that frame's inputs.
+// Input slot (device memory, planar, written by list A): one real frame.
+typedef struct Rdna2FgFrame {
+    const void* color;             // RGBA16F width x height, pitch width*8: hudless colour if has_hudless, else the finished frame
+    const void* final_color;       // RGBA16F width x height: the finished frame with UI (== color if !has_hudless)
+    const void* mv;                // RG16F mv_width x mv_height, pitch mv_width*4: current -> previous offset in mv_width x mv_height
+    uint32_t mv_width, mv_height;  //   pixels (prev_uv = uv + mv / mv_size); zeros when the game gives none
+    const void* depth;             // R32F depth_width x depth_height, pitch depth_width*4: raw device depth (zeros when none)
+    uint32_t depth_width, depth_height;
+    uint32_t has_hudless, has_mv, has_depth, has_matrices, depth_inverted;
+    float min_rel_separation;      // 40 if the game gives none
+    float clip_to_prev_clip[16], prev_clip_to_clip[16];   // identity if !has_matrices
+} Rdna2FgFrame;
+// Outputs: RGBA16F (uint2 per pixel, pitch width*8), one per generated frame at time t[i] (0 = previous frame, 1 = current frame),
+// FINISHED frames (with the UI); the runtime copies them to FFX's outputs as they are.
 typedef struct Rdna2FgNetArgs {
     uint32_t struct_size;
     uint32_t width, height;
-    const void* cur;               // device pointer, input slot of the current frame
-    const void* prev;              // device pointer, input slot of the previous frame (valid only if has_prev)
-    int32_t has_prev;              // 0: first frame / reset - output the current frame
+    Rdna2FgFrame cur;              // current real frame
+    Rdna2FgFrame prev;             // previous real frame, colour planes only (valid only if has_prev)
+    int32_t has_prev;              // 0: first frame / reset / the previous job did not run - output the current frame
     uint32_t num_frames;           // 1..RDNA2FG_MAX_FRAMES
     void* out[RDNA2FG_MAX_FRAMES];  // device pointers
     float t[RDNA2FG_MAX_FRAMES];
-    void* stream;                  // hipStream_t: enqueue only; never synchronize, never wait on anything D3D12 writes
+    void* stream;                  // hipStream_t: enqueue only; never wait on anything D3D12 writes
 } Rdna2FgNetArgs;
 typedef int32_t (*PFN_Rdna2FgNetCreate)(int32_t hip_device, void** net);  // exported as Rdna2FgNetCreate; 0 = ok
-typedef int32_t (*PFN_Rdna2FgNetRun)(void* net, const Rdna2FgNetArgs* a);  // Rdna2FgNetRun; 0 = ok
+typedef int32_t (*PFN_Rdna2FgNetRun)(void* net, const Rdna2FgNetArgs* a);  // Rdna2FgNetRun; 0 = ok, < 0: error (FG off)
 typedef void (*PFN_Rdna2FgNetDestroy)(void* net);                           // Rdna2FgNetDestroy
+typedef const char* (*PFN_Rdna2FgNetLastError)(void);                       // Rdna2FgNetLastError: why Create failed / what runs
 
 #ifdef RDNA2FG_EXPORTS
 #if defined(__HIP_DEVICE_COMPILE__)

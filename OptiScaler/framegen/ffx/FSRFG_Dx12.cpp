@@ -2204,7 +2204,15 @@ bool FSRFG_Dx12::Rdna2RecordInputs(int fIndex, UINT64 frameId)
         in.mv_scale_y = _mvScaleY[fIndex];
     }
 
+    // The game's finished frame, about to be presented: the colour without hudless, the UI source with it
     ID3D12Resource* backBuffer = nullptr;
+    IDXGISwapChain3* sc3 = nullptr;
+    if (_swapChain->QueryInterface(IID_PPV_ARGS(&sc3)) == S_OK)
+    {
+        sc3->GetBuffer(sc3->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&backBuffer));
+        sc3->Release();
+    }
+
     auto hudless = GetResource(FG_ResourceType::HudlessColor, fIndex);
 
     if (hudless && IsResourceReady(FG_ResourceType::HudlessColor, fIndex) &&
@@ -2213,20 +2221,21 @@ bool FSRFG_Dx12::Rdna2RecordInputs(int fIndex, UINT64 frameId)
         in.color = hudless->GetResource();
         in.color_state = stateOf(*hudless);
         in.color_is_hudless = 1;
+        in.final_color = backBuffer;
+        in.final_color_state = D3D12_RESOURCE_STATE_PRESENT;
     }
     else
     {
-        // The game's finished frame, about to be presented
-        IDXGISwapChain3* sc3 = nullptr;
-        if (_swapChain->QueryInterface(IID_PPV_ARGS(&sc3)) == S_OK)
-        {
-            sc3->GetBuffer(sc3->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&backBuffer));
-            sc3->Release();
-        }
-
         in.color = backBuffer;
         in.color_state = D3D12_RESOURCE_STATE_PRESENT;
     }
+
+    // Camera matrices (Streamline input) and depth settings for the DLSS-FG pipeline
+    in.has_matrices = _hasClipMatrices[fIndex] ? 1 : 0;
+    std::memcpy(in.clip_to_prev_clip, _clipToPrevClip[fIndex], sizeof(in.clip_to_prev_clip));
+    std::memcpy(in.prev_clip_to_clip, _prevClipToClip[fIndex], sizeof(in.prev_clip_to_clip));
+    in.min_rel_separation = _minRelSeparation[fIndex];
+    in.depth_inverted = _constants.flags[FG_Flags::InvertedDepth] ? 1 : 0;
 
     int32_t result = in.color != nullptr ? _rdna2RecordInputs(_rdna2Ctx, &in) : RDNA2FG_ERROR;
 

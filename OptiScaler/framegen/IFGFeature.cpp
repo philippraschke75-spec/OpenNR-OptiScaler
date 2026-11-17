@@ -256,6 +256,18 @@ void IFGFeature::SetReset(UINT reset, int index)
     _reset[index] = reset;
 }
 
+void IFGFeature::SetClipMatrices(const float* clipToPrevClip, const float* prevClipToClip, float minRelSeparation,
+                                 int index)
+{
+    if (index < 0)
+        index = GetIndex();
+
+    std::memcpy(_clipToPrevClip[index], clipToPrevClip, 16 * sizeof(float));
+    std::memcpy(_prevClipToClip[index], prevClipToClip, 16 * sizeof(float));
+    _minRelSeparation[index] = minRelSeparation;
+    _hasClipMatrices[index] = true;
+}
+
 void IFGFeature::SetInterpolationRect(UINT64 width, UINT height, int index)
 {
     if (index < 0)

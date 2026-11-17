@@ -242,6 +242,11 @@ bool Sl_Inputs::setConstants(const sl::Constants& values, uint32_t frameId)
 
         fgOutput->SetReset(data.reset == sl::Boolean::eTrue);
 
+        // RDNA2 DLSS-FG reprojects with the camera matrices
+        fgOutput->SetClipMatrices(reinterpret_cast<const float*>(&data.clipToPrevClip),
+                                  reinterpret_cast<const float*>(&data.prevClipToClip),
+                                  data.minRelativeLinearDepthObjectSeparation);
+
         fgOutput->SetFrameTimeDelta(static_cast<float>(State::Instance().lastFGFrameTime));
     }
     else

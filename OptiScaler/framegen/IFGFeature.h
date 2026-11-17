@@ -69,6 +69,10 @@ class IFGFeature
     std::optional<UINT> _interpolationLeft[BUFFER_COUNT];
     std::optional<UINT> _interpolationTop[BUFFER_COUNT];
     UINT _reset[BUFFER_COUNT] = {};
+    float _clipToPrevClip[BUFFER_COUNT][16] {}; ///< sl::Constants::clipToPrevClip (Streamline input)
+    float _prevClipToClip[BUFFER_COUNT][16] {}; ///< sl::Constants::prevClipToClip
+    float _minRelSeparation[BUFFER_COUNT] {};  ///< sl::Constants::minRelativeLinearDepthObjectSeparation
+    bool _hasClipMatrices[BUFFER_COUNT] {};
 
     UINT64 _frameCount = 0;
     UINT64 _lastDispatchedFrame = 0;
@@ -155,6 +159,7 @@ class IFGFeature
                        int index = -1);
     void SetFrameTimeDelta(double delta, int index = -1);
     void SetReset(UINT reset, int index = -1);
+    void SetClipMatrices(const float* clipToPrevClip, const float* prevClipToClip, float minRelSeparation, int index = -1);
     void SetInterpolationRect(UINT64 width, UINT height, int index = -1);
     void GetInterpolationRect(UINT64& width, UINT& height, int index = -1);
     void SetInterpolationPos(UINT left, UINT top, int index = -1);
